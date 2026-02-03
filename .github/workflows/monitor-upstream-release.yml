@@ -1,0 +1,147 @@
+name: Monitor upstream releases and push assets to GHCR
+
+on:
+  schedule:
+    # every day at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to update the state file
+  id-token: write
+
+env:
+  UPSTREAM_REPO: kubernetes-sigs/alibaba-cloud-csi-driver
+  STATE_FILE: .github/last_upstream_release.json
+  GHCR_OWNER: enix223
+  GHCR_REPO: alibaba-cloud-csi-driver
+  MATCH_REGEX: "\\.(taz|tgz|tar\\.gz)$"
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up QEMU (for multi-arch builds)
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Fetch latest release from upstream
+        id: fetch_release
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest"
+          echo "Fetching latest release from $api"
+          resp=$(curl -sL "$api")
+          echo "$resp" > latest_release.json
+          release_id=$(jq -r .id latest_release.json)
+          release_tag=$(jq -r .tag_name latest_release.json)
+          if [ "$release_id" = "null" ]; then
+            echo "No release found. Exiting."
+            echo "processed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "release_id=$release_id" >> $GITHUB_OUTPUT
+          echo "release_tag=$release_tag" >> $GITHUB_OUTPUT
+
+      - name: Check and process new release
+        env:
+          STATE_FILE: ${{ env.STATE_FILE }}
+          MATCH_REGEX: ${{ env.MATCH_REGEX }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          GHCR_OWNER: ${{ env.GHCR_OWNER }}
+          GHCR_REPO: ${{ env.GHCR_REPO }}
+        run: |
+          set -euo pipefail
+          release_id=${{ steps.fetch_release.outputs.release_id }}
+          release_tag=${{ steps.fetch_release.outputs.release_tag }}
+
+          echo "Latest upstream release: $release_tag ($release_id)"
+
+          prev_id=""
+          if [ -f "$STATE_FILE" ]; then
+            prev_id=$(jq -r .id "$STATE_FILE" 2>/dev/null || echo "")
+          fi
+
+          if [ "$prev_id" = "$release_id" ]; then
+            echo "Release $release_tag already processed (id=$release_id). Exiting."
+            exit 0
+          fi
+
+          # Parse assets that match the regex
+          assets=$(jq -r '.assets[] | select(.name | test("'$MATCH_REGEX'")) | @base64' latest_release.json || true)
+
+          if [ -z "$assets" ]; then
+            echo "No matching assets (regex=$MATCH_REGEX) found in release $release_tag. Recording as processed."
+            mkdir -p "$(dirname $STATE_FILE)"
+            printf '{"id":%s,"tag":"%s","processed_at":"%s"}\n' "$release_id" "$release_tag" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $STATE_FILE
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add $STATE_FILE || true
+            git commit -m "Record processed release $release_tag (no matching assets)" || true
+            git push || true
+            exit 0
+          fi
+
+          echo "Found matching assets. Processing..."
+
+          # Ensure build directory
+          mkdir -p ./build
+
+          # Download each matching asset and push as an OCI image to GHCR using Docker buildx
+          while IFS= read -r a; do
+            _jq() { echo "$a" | base64 --decode | jq -r "$1"; }
+            name=$(_jq '.name')
+            url=$(_jq '.browser_download_url')
+
+            echo "Downloading asset: $name"
+            curl -L -f -o "$name" "$url"
+
+            safe_name=$(echo "$name" | tr -c '[:alnum:]._-' '-')
+            tag_name=$(echo "$release_tag" | tr -c '[:alnum:]._-' '-')
+            image_tag="ghcr.io/${GHCR_OWNER}/${GHCR_REPO}:${tag_name}-${safe_name}"
+
+            echo "Building and pushing image: $image_tag"
+
+            mkdir -p "build/$safe_name"
+            cat > "build/$safe_name/Dockerfile" <<EOF
+            FROM scratch
+            COPY ${name} /${name}
+            EOF
+            cp "$name" "build/$safe_name/"
+
+            # Build and push (uses current docker login)
+            docker buildx build --platform linux/amd64 -t "$image_tag" --push "build/$safe_name"
+
+            # cleanup
+            rm -rf "build/$safe_name" "$name"
+
+          done <<< "$assets"
+
+          # Record the processed release
+          mkdir -p "$(dirname $STATE_FILE)"
+          printf '{"id":%s,"tag":"%s","processed_at":"%s"}\n' "$release_id" "$release_tag" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $STATE_FILE
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add $STATE_FILE
+          git commit -m "Record processed release $release_tag" || echo "No changes to commit"
+          git push || echo "Push failed"
+
+      - name: Cleanup build directory
+        if: always()
+        run: rm -rf build || true
