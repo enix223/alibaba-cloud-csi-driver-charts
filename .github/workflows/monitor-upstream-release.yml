@@ -86,14 +86,7 @@ jobs:
           assets=$(jq -r '.assets[] | select(.name | test("'$MATCH_REGEX'")) | @base64' latest_release.json || true)
 
           if [ -z "$assets" ]; then
-            echo "No matching assets (regex=$MATCH_REGEX) found in release $release_tag. Recording as processed."
-            mkdir -p "$(dirname $STATE_FILE)"
-            printf '{"id":%s,"tag":"%s","processed_at":"%s"}\n' "$release_id" "$release_tag" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $STATE_FILE
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add $STATE_FILE || true
-            git commit -m "Record processed release $release_tag (no matching assets)" || true
-            git push || true
+            echo "No matching assets (regex=$MATCH_REGEX) found in release $release_tag. Skipping without committing changes."
             exit 0
           fi
 
