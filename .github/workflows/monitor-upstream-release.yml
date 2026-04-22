@@ -15,7 +15,7 @@ env:
   STATE_FILE: .github/last_upstream_release.json
   GHCR_OWNER: enix223
   GHCR_REPO: alibaba-cloud-csi-driver
-  MATCH_REGEX: "\\.(taz|tgz|tar\\.gz)$"
+  MATCH_REGEX: '\.(taz|tgz|tar\.gz)$'
 
 jobs:
   monitor:
@@ -82,8 +82,9 @@ jobs:
             exit 0
           fi
 
-          # Parse assets that match the regex
-          assets=$(jq -r '.assets[] | select(.name | test("'$MATCH_REGEX'")) | @base64' latest_release.json || true)
+          # Parse assets that match the regex.
+          # Use --arg to avoid shell/jq escaping pitfalls in regex strings.
+          assets=$(jq -r --arg re "$MATCH_REGEX" '.assets[] | select(.name | test($re)) | @base64' latest_release.json || true)
 
           if [ -z "$assets" ]; then
             echo "No matching assets (regex=$MATCH_REGEX) found in release $release_tag. Skipping without committing changes."
