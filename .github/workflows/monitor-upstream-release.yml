@@ -112,10 +112,7 @@ jobs:
             echo "Building and pushing image: $image_tag"
 
             mkdir -p "build/$safe_name"
-            cat > "build/$safe_name/Dockerfile" <<EOF
-            FROM scratch
-            COPY ${name} /${name}
-            EOF
+            printf 'FROM scratch\nCOPY %s /%s\n' "$name" "$name" > "build/$safe_name/Dockerfile"
             cp "$name" "build/$safe_name/"
 
             # Build and push (uses current docker login)
