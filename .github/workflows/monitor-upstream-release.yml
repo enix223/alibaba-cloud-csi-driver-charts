@@ -105,9 +105,15 @@ jobs:
             echo "Downloading asset: $name"
             curl -L -f -o "$name" "$url"
 
-            safe_name=$(echo "$name" | tr -c '[:alnum:]._-' '-')
-            tag_name=$(echo "$release_tag" | tr -c '[:alnum:]._-' '-')
-            image_tag="ghcr.io/${GHCR_OWNER}/${GHCR_REPO}:${tag_name}-${safe_name}"
+            safe_name=$(echo "$name" | tr -c '[:alnum:]._-' '-' | sed 's/^-*//; s/-*$//')
+
+            # Use a clean semantic version tag (e.g. 1.35.3) instead of release+filename.
+            version_tag=$(printf '%s\n%s\n' "$release_tag" "$name" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)?' | head -n1 || true)
+            if [ -z "$version_tag" ]; then
+              version_tag=$(echo "$release_tag" | sed -E 's/^v//' | tr -c '[:alnum:]._-' '-' | sed 's/^-*//; s/-*$//')
+            fi
+
+            image_tag="ghcr.io/${GHCR_OWNER}/${GHCR_REPO}:${version_tag}"
 
             echo "Building and pushing image: $image_tag"
 
@@ -116,7 +122,7 @@ jobs:
             cp "$name" "build/$safe_name/"
 
             # Build and push (uses current docker login)
-            docker buildx build --platform linux/amd64 -t "$image_tag" --push "build/$safe_name"
+            docker buildx build --platform linux/amd64 --provenance=false --sbom=false -t "$image_tag" --push "build/$safe_name"
 
             # cleanup
             rm -rf "build/$safe_name" "$name"
